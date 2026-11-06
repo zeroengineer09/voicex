@@ -64,7 +64,7 @@ try {
     console.log('Registering VoiceX commands...');
 
     await rest.put(
-        Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+        Routes.applicationCommands(CLIENT_ID),
         { body: commands }
     );
 
