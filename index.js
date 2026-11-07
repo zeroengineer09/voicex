@@ -1,3 +1,4 @@
+
 import 'dotenv/config';
 
 import {
@@ -18,29 +19,25 @@ import {
     entersState
 } from '@discordjs/voice';
 
-import Cartesia from '@cartesia/cartesia-js';
 import { spawn } from 'node:child_process';
 import ffmpegPath from 'ffmpeg-static';
-
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
 // Environment
 const {
     DISCORD_TOKEN,
-    CARTESIA_API_KEY
+    ELEVENLABS_API_KEY
 } = process.env;
 
-// Settings
-const MODEL_ID = 'sonic-3.6';
-const LANGUAGE = 'hi';
-
-const DEFAULT_VOICE_ID = 'db6b0ed5-d5d3-463d-ae85-518a07d3c2b4';
+// ElevenLabs settings
+const MODEL_ID = 'eleven_multilingual_v2';
+const DEFAULT_VOICE_ID = '21m00Tcm4TlvDq8ikWAM';
 
 const SETTINGS_FILE = path.resolve('./voice-settings.json');
 
-if (!DISCORD_TOKEN || !CARTESIA_API_KEY) {
-    console.error('Missing Discord or Cartesia API key!');
+if (!DISCORD_TOKEN || !ELEVENLABS_API_KEY) {
+    console.error('Missing Discord or ElevenLabs API key!');
     process.exit(1);
 }
 
@@ -59,38 +56,68 @@ const client = new Client({
     ]
 });
 
-// Cartesia
-const cartesia = new Cartesia({
-    apiKey: CARTESIA_API_KEY
-});
-
 // Data
 const sessions = new Map();
 const guildVoices = new Map();
+const guildNicknames = new Map();
 
 let availableVoices = [];
 
-// Load saved server voices
+// Settings helpers
+function getNicknameKey(guildId, userId) {
+    return `${guildId}:${userId}`;
+}
+
+function getTTSName(member, guildId = member?.guild?.id) {
+    if (!member || !guildId) return 'Someone';
+
+    const customName = guildNicknames.get(
+        getNicknameKey(guildId, member.id)
+    );
+
+    return customName ||
+        member.displayName ||
+        member.user.globalName ||
+        member.user.username;
+}
+
+// Load settings
 async function loadSettings() {
     try {
         const data = await fs.readFile(SETTINGS_FILE, 'utf8');
         const saved = JSON.parse(data);
 
-        for (const [guildId, voiceId] of Object.entries(saved)) {
-            guildVoices.set(guildId, voiceId);
+        if (saved.guildVoices || saved.guildNicknames) {
+            for (const [id, voice] of Object.entries(saved.guildVoices || {})) {
+                guildVoices.set(id, voice);
+            }
+
+            for (const [id, name] of Object.entries(saved.guildNicknames || {})) {
+                guildNicknames.set(id, name);
+            }
+        } else {
+            // Old settings compatibility
+            for (const [id, voice] of Object.entries(saved || {})) {
+                if (typeof voice === 'string') {
+                    guildVoices.set(id, voice);
+                }
+            }
         }
 
-        console.log('Saved voice settings loaded.');
+        console.log('Voice and nickname settings loaded.');
     } catch (error) {
         if (error.code !== 'ENOENT') {
-            console.error('Settings load error:', error.message);
+            console.error('Settings error:', error.message);
         }
     }
 }
 
-// Save server voices
+// Save settings
 async function saveSettings() {
-    const data = Object.fromEntries(guildVoices);
+    const data = {
+        guildVoices: Object.fromEntries(guildVoices),
+        guildNicknames: Object.fromEntries(guildNicknames)
+    };
 
     await fs.writeFile(
         SETTINGS_FILE,
@@ -99,22 +126,44 @@ async function saveSettings() {
     );
 }
 
-// Load Cartesia voices
-async function loadVoices() {
-    console.log('Loading Cartesia voices...');
-
-    const voices = [];
-
-    try {
-        for await (const voice of cartesia.voices.list()) {
-            if (voice.id && voice.name) {
-                voices.push(voice);
+// ElevenLabs API request helper
+async function elevenLabsRequest(endpoint, options = {}) {
+    const response = await fetch(
+        `https://api.elevenlabs.io/v1${endpoint}`,
+        {
+            ...options,
+            headers: {
+                'xi-api-key': ELEVENLABS_API_KEY,
+                ...options.headers
             }
         }
+    );
 
-        availableVoices = voices;
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(
+            `ElevenLabs API ${response.status}: ${errorText.slice(0, 500)}`
+        );
+    }
 
-        console.log(`Loaded ${availableVoices.length} voices.`);
+    return response;
+}
+
+// Load ElevenLabs voices
+async function loadVoices() {
+    console.log('Loading ElevenLabs voices...');
+
+    try {
+        const response = await elevenLabsRequest('/voices');
+        const data = await response.json();
+
+        availableVoices = (data.voices || []).map(voice => ({
+            id: voice.voice_id,
+            name: voice.name,
+            gender: voice.labels?.gender || 'unknown'
+        }));
+
+        console.log(`Loaded ${availableVoices.length} ElevenLabs voices.`);
     } catch (error) {
         console.error('Voice loading error:', error.message);
     }
@@ -126,7 +175,6 @@ function getGuildVoice(guildId) {
 
     if (savedId) {
         const voice = availableVoices.find(v => v.id === savedId);
-
         if (voice) return voice;
     }
 
@@ -134,23 +182,30 @@ function getGuildVoice(guildId) {
         || availableVoices[0];
 }
 
-// Generate speech
+// Generate speech with ElevenLabs
 async function generateSpeech(text, voiceId) {
-    const response = await cartesia.tts.generate({
-        model_id: MODEL_ID,
-        transcript: text,
-        voice: voiceId,
-        language: LANGUAGE,
-        output_format: {
-            container: 'wav',
-            encoding: 'pcm_s16le',
-            sample_rate: 44100
+    const response = await elevenLabsRequest(
+        `/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
+        {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                text,
+                model_id: MODEL_ID,
+                language_code: 'hi',
+                voice_settings: {
+                    stability: 0.5,
+                    similarity_boost: 0.75,
+                    style: 0.2,
+                    use_speaker_boost: true
+                }
+            })
         }
-    });
+    );
 
-    const audioBlob = await response.blob();
-
-    return Buffer.from(await audioBlob.arrayBuffer());
+    return Buffer.from(await response.arrayBuffer());
 }
 
 // Play audio
@@ -218,7 +273,7 @@ async function processQueue(session) {
                 const voice = getGuildVoice(session.guildId);
 
                 if (!voice) {
-                    console.error('No available Cartesia voice.');
+                    console.error('No available ElevenLabs voice.');
                     continue;
                 }
 
@@ -250,7 +305,7 @@ async function processQueue(session) {
     }
 }
 
-// Add text to queue
+// Add speech to queue
 function enqueueSpeech(session, text) {
     if (!text || !text.trim()) return;
 
@@ -270,7 +325,7 @@ function stopSpeech(session) {
     session.player.stop(true);
 }
 
-// Create session
+// Create voice session
 function createSession(guild, voiceChannel) {
     const oldSession = sessions.get(guild.id);
 
@@ -328,29 +383,27 @@ client.once(Events.ClientReady, async readyClient => {
     await loadVoices();
 
     console.log(`Available voices: ${availableVoices.length}`);
-    console.log('Language: Hindi');
+    console.log('TTS Provider: ElevenLabs');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 });
 
-// Voice autocomplete
+// Interactions
 client.on(Events.InteractionCreate, async interaction => {
+
+    // Voice autocomplete
     if (interaction.isAutocomplete()) {
         if (interaction.commandName !== 'setvoice') return;
 
         const focused = interaction.options.getFocused().toLowerCase();
 
         const results = availableVoices
-            .filter(voice => {
-                const gender = voice.gender || 'unknown';
-
-                return (
-                    voice.name.toLowerCase().includes(focused) ||
-                    gender.toLowerCase().includes(focused)
-                );
-            })
+            .filter(voice =>
+                voice.name.toLowerCase().includes(focused) ||
+                voice.gender.toLowerCase().includes(focused)
+            )
             .slice(0, 25)
             .map(voice => ({
-                name: `${voice.name} (${voice.gender || 'unknown'})`,
+                name: `${voice.name} (${voice.gender})`.slice(0, 100),
                 value: voice.id
             }));
 
@@ -364,6 +417,61 @@ client.on(Events.InteractionCreate, async interaction => {
 
     try {
         await interaction.deferReply();
+
+        // SET NICKNAME
+        if (interaction.commandName === 'setnick') {
+            const requestedName = interaction.options
+                .getString('name', true)
+                .trim();
+
+            const key = getNicknameKey(guildId, interaction.user.id);
+
+            if (requestedName.toLowerCase() === 'reset') {
+                guildNicknames.delete(key);
+                await saveSettings();
+
+                const member = await interaction.guild.members.fetch(
+                    interaction.user.id
+                );
+
+                return interaction.editReply(
+                    `✅ Custom TTS name reset. VoiceX will now say **${member.displayName}**.`
+                );
+            }
+
+            if (!requestedName || requestedName.length > 32) {
+                return interaction.editReply(
+                    '❌ Name must be between 1 and 32 characters.'
+                );
+            }
+
+            guildNicknames.set(key, requestedName);
+            await saveSettings();
+
+            return interaction.editReply(
+                `✅ Your TTS name is now **${requestedName}**!`
+            );
+        }
+
+        // ABOUT
+        if (interaction.commandName === 'about') {
+            const member = await interaction.guild.members.fetch(
+                interaction.user.id
+            );
+
+            return interaction.editReply({
+                content: [
+                    '**🎧 VoiceX — Discord TTS Bot**',
+                    'Converts messages into voice audio in your server.',
+                    '',
+                    `**Your TTS name:** ${getTTSName(member, guildId)}`,
+                    '**Name priority:** Custom TTS name → Server nickname → Discord username',
+                    '',
+                    '**TTS Provider:** ElevenLabs',
+                    '**Made by Raxxy Developer**'
+                ].join('\n')
+            });
+        }
 
         // JOIN
         if (interaction.commandName === 'join') {
@@ -456,22 +564,22 @@ client.on(Events.InteractionCreate, async interaction => {
         if (interaction.commandName === 'voices') {
             if (availableVoices.length === 0) {
                 return interaction.editReply(
-                    '❌ Voices load nahi hui. Bot restart karke try karo.'
+                    '❌ ElevenLabs voices load nahi hui. API key check karo.'
                 );
             }
 
             const male = availableVoices
-                .filter(v => v.gender === 'masculine')
+                .filter(v => v.gender.toLowerCase() === 'male')
                 .map(v => `👨 ${v.name}`)
                 .slice(0, 20);
 
             const female = availableVoices
-                .filter(v => v.gender === 'feminine')
+                .filter(v => v.gender.toLowerCase() === 'female')
                 .map(v => `👩 ${v.name}`)
                 .slice(0, 20);
 
-            const neutral = availableVoices
-                .filter(v => v.gender === 'gender_neutral')
+            const other = availableVoices
+                .filter(v => !['male', 'female'].includes(v.gender.toLowerCase()))
                 .map(v => `⚪ ${v.name}`)
                 .slice(0, 10);
 
@@ -486,8 +594,8 @@ client.on(Events.InteractionCreate, async interaction => {
                 '**Female voices**',
                 female.join('\n') || 'No female voices found.',
                 '',
-                '**Gender-neutral voices**',
-                neutral.join('\n') || 'No neutral voices found.',
+                '**Other voices**',
+                other.join('\n') || 'No other voices found.',
                 '',
                 'Use `/setvoice` to change your voice.'
             ].join('\n');
@@ -512,11 +620,10 @@ client.on(Events.InteractionCreate, async interaction => {
             }
 
             guildVoices.set(guildId, selectedVoice.id);
-
             await saveSettings();
 
             return interaction.editReply(
-                `✅ Voice changed to **${selectedVoice.name}** (${selectedVoice.gender || 'unknown'})!`
+                `✅ Voice changed to **${selectedVoice.name}** (${selectedVoice.gender})!`
             );
         }
 
@@ -532,7 +639,7 @@ client.on(Events.InteractionCreate, async interaction => {
 });
 
 // Automatic voice-channel text chat reading
-client.on(Events.MessageCreate, message => {
+client.on(Events.MessageCreate, async message => {
     if (message.author.bot) return;
     if (!message.guild) return;
     if (!message.content.trim()) return;
@@ -550,9 +657,25 @@ client.on(Events.MessageCreate, message => {
         return;
     }
 
-    const text = `${message.author.username} says: ${message.content}`;
+    try {
+        const member = message.member ||
+            await message.guild.members.fetch(message.author.id);
 
-    enqueueSpeech(session, text.slice(0, 500));
+        const displayName = getTTSName(member, message.guild.id);
+        const text = `${displayName} says: ${message.content}`;
+
+        enqueueSpeech(session, text.slice(0, 500));
+    } catch (error) {
+        console.error('Display name error:', error.message);
+
+        const fallback = message.author.globalName ||
+            message.author.username;
+
+        enqueueSpeech(
+            session,
+            `${fallback} says: ${message.content}`.slice(0, 500)
+        );
+    }
 });
 
 // Discord errors
