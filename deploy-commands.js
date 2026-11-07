@@ -1,3 +1,4 @@
+
 import 'dotenv/config';
 
 import {
@@ -9,7 +10,7 @@ import {
 const { DISCORD_TOKEN, CLIENT_ID } = process.env;
 
 if (!DISCORD_TOKEN || !CLIENT_ID) {
-    console.error('Missing DISCORD_TOKEN or CLIENT_ID.');
+    console.error('Missing DISCORD_TOKEN or CLIENT_ID in .env');
     process.exit(1);
 }
 
@@ -37,7 +38,7 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('voices')
-        .setDescription('Show available Cartesia voices'),
+        .setDescription('Show available ElevenLabs voices'),
 
     new SlashCommandBuilder()
         .setName('setvoice')
@@ -88,5 +89,5 @@ try {
     console.log('All 9 VoiceX commands registered!');
 } catch (error) {
     console.error('Command registration failed:', error);
-    process.exit(1);
+    process.exitCode = 1;
 }

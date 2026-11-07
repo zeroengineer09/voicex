@@ -1,3 +1,4 @@
+
 import 'dotenv/config';
 
 import {
@@ -18,20 +19,17 @@ import {
     entersState
 } from '@discordjs/voice';
 
-import Cartesia from '@cartesia/cartesia-js';
 import { spawn } from 'node:child_process';
 import ffmpegPath from 'ffmpeg-static';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
 // Environment
-const {
-    DISCORD_TOKEN,
-    CARTESIA_API_KEY
-} = process.env;
+const { DISCORD_TOKEN, ELEVENLABS_API_KEY } = process.env;
 
-// Cartesia settings
-const MODEL_ID = 'sonic-3.6';
+// ElevenLabs settings
+const MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_multilingual_v2';
+const OUTPUT_FORMAT = 'mp3_44100_128';
 const DEFAULT_LANGUAGE = 'hi';
 
 const SUPPORTED_LANGUAGES = {
@@ -40,11 +38,11 @@ const SUPPORTED_LANGUAGES = {
     english: { code: 'en', label: 'English' }
 };
 
-const DEFAULT_VOICE_ID = 'db6b0ed5-d5d3-463d-ae85-518a07d3c2b4';
+const DEFAULT_VOICE_ID = process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'JBFqnCBsd6RMkjVDRZzb';
 const SETTINGS_FILE = path.resolve('./voice-settings.json');
 
-if (!DISCORD_TOKEN || !CARTESIA_API_KEY) {
-    console.error('Missing Discord or Cartesia API key!');
+if (!DISCORD_TOKEN || !ELEVENLABS_API_KEY) {
+    console.error('Missing DISCORD_TOKEN or ELEVENLABS_API_KEY in environment variables!');
     process.exit(1);
 }
 
@@ -61,11 +59,6 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent
     ]
-});
-
-// Cartesia client
-const cartesia = new Cartesia({
-    apiKey: CARTESIA_API_KEY
 });
 
 // Data
@@ -162,32 +155,51 @@ async function saveSettings() {
     );
 }
 
-// Load Cartesia voices
+// Load ElevenLabs voices (v2 endpoint with pagination)
 async function loadVoices() {
-    console.log('Loading Cartesia voices...');
+    console.log('Loading ElevenLabs voices...');
 
     try {
         const voices = [];
+        let nextPageToken = null;
 
-        for await (const voice of cartesia.voices.list()) {
-            if (voice.id && voice.name) {
-                voices.push({
-                    id: voice.id,
-                    name: voice.name,
-                    gender: voice.gender ||
-                        voice.metadata?.gender ||
-                        'unknown'
-                });
+        do {
+            const url = new URL('https://api.elevenlabs.io/v2/voices');
+            url.searchParams.set('page_size', '100');
+            url.searchParams.set('include_total_count', 'false');
+            if (nextPageToken) {
+                url.searchParams.set('next_page_token', nextPageToken);
             }
-        }
+
+            const response = await fetch(url, {
+                headers: { 'xi-api-key': ELEVENLABS_API_KEY }
+            });
+
+            if (!response.ok) {
+                const detail = await response.text();
+                throw new Error(`ElevenLabs voices API ${response.status}: ${detail.slice(0, 500)}`);
+            }
+
+            const data = await response.json();
+
+            for (const voice of data.voices || []) {
+                if (voice.voice_id && voice.name) {
+                    voices.push({
+                        id: voice.voice_id,
+                        name: voice.name,
+                        gender: voice.labels?.gender || 'unknown'
+                    });
+                }
+            }
+
+            nextPageToken = data.has_more ? data.next_page_token : null;
+        } while (nextPageToken);
 
         availableVoices = voices;
-
-        console.log(
-            `Loaded ${availableVoices.length} Cartesia voices.`
-        );
+        console.log(`Loaded ${availableVoices.length} ElevenLabs voices.`);
     } catch (error) {
-        console.error('Voice loading error:', error.message);
+        console.error('ElevenLabs voice loading error:', error.message);
+        availableVoices = [];
     }
 }
 
@@ -204,23 +216,40 @@ function getGuildVoice(guildId) {
         || availableVoices[0];
 }
 
-// Generate speech
+// Generate speech with ElevenLabs
 async function generateSpeech(text, voiceId, language) {
-    const response = await cartesia.tts.generate({
-        model_id: MODEL_ID,
-        transcript: text,
-        voice: voiceId,
-        language,
-        output_format: {
-            container: 'wav',
-            encoding: 'pcm_s16le',
-            sample_rate: 44100
-        }
+    const url = new URL(
+        `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`
+    );
+    url.searchParams.set('output_format', OUTPUT_FORMAT);
+
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+            'xi-api-key': ELEVENLABS_API_KEY,
+            'Content-Type': 'application/json',
+            'Accept': 'audio/mpeg'
+        },
+        body: JSON.stringify({
+            text,
+            model_id: MODEL_ID,
+            // eleven_multilingual_v2 performs multilingual detection itself.
+            // language is retained for the existing /setlang server setting.
+            voice_settings: {
+                stability: 0.5,
+                similarity_boost: 0.75,
+                style: 0,
+                use_speaker_boost: true
+            }
+        })
     });
 
-    const audioBlob = await response.blob();
+    if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(`ElevenLabs TTS API ${response.status}: ${detail.slice(0, 700)}`);
+    }
 
-    return Buffer.from(await audioBlob.arrayBuffer());
+    return Buffer.from(await response.arrayBuffer());
 }
 
 // Play audio
@@ -288,13 +317,13 @@ async function processQueue(session) {
                 const voice = getGuildVoice(session.guildId);
 
                 if (!voice) {
-                    console.error('No available Cartesia voice.');
+                    console.error('No available ElevenLabs voice.');
                     continue;
                 }
 
                 const language = getGuildLanguage(session.guildId);
 
-                console.log(`Speaking with ${voice.name}:`, text);
+                console.log(`Speaking with ElevenLabs voice ${voice.name}:`, text);
                 console.log(`TTS language: ${getLanguageLabel(language)}`);
 
                 const audio = await generateSpeech(
@@ -355,28 +384,13 @@ function createSession(guild, voiceChannel) {
     if (oldSession) {
         stopSpeech(oldSession);
         oldSession.connection.destroy();
-        sessions.delete(guild.id);
     }
-
-    console.log('[VOICE] Creating connection...');
-    console.log('[VOICE] Guild:', guild.id);
-    console.log('[VOICE] Channel:', voiceChannel.id);
 
     const connection = joinVoiceChannel({
         channelId: voiceChannel.id,
         guildId: guild.id,
         adapterCreator: guild.voiceAdapterCreator,
-        selfDeaf: false,
-        selfMute: false,
-        debug: true
-    });
-
-    connection.on('stateChange', (oldState, newState) => {
-        console.log(`[VOICE STATE] ${oldState.status} -> ${newState.status}`);
-    });
-
-    connection.on('error', error => {
-        console.error('[VOICE ERROR]', error);
+        selfDeaf: false
     });
 
     const player = createAudioPlayer({
@@ -398,12 +412,12 @@ function createSession(guild, voiceChannel) {
 
     sessions.set(guild.id, session);
 
-    player.on('error', error => {
-        console.error('[PLAYER ERROR]', error);
+    connection.on('error', error => {
+        console.error('Voice connection error:', error);
     });
 
-    player.on('stateChange', (oldState, newState) => {
-        console.log(`[PLAYER STATE] ${oldState.status} -> ${newState.status}`);
+    player.on('error', error => {
+        console.error('Audio player error:', error);
     });
 
     return session;
@@ -421,7 +435,7 @@ client.once(Events.ClientReady, async readyClient => {
     await loadVoices();
 
     console.log(`Available voices: ${availableVoices.length}`);
-    console.log('TTS Provider: Cartesia');
+    console.log(`TTS Provider: ElevenLabs (${MODEL_ID})`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 });
 
@@ -527,7 +541,7 @@ client.on(Events.InteractionCreate, async interaction => {
                     '**Name priority:** Custom TTS name → Server nickname → Discord username',
                     '',
                     `**Language:** ${getLanguageLabel(getGuildLanguage(guildId))}`,
-                    '**TTS Provider:** Cartesia',
+                    '**TTS Provider:** ElevenLabs',
                     '**Made by Raxxy Developer**'
                 ].join('\n')
             });
@@ -547,51 +561,20 @@ client.on(Events.InteractionCreate, async interaction => {
                 );
             }
 
-            const botMember = interaction.guild.members.me ||
-                await interaction.guild.members.fetchMe();
-            const permissions = voiceChannel.permissionsFor(botMember);
+            const session = createSession(
+                interaction.guild,
+                voiceChannel
+            );
 
-            if (!permissions || !permissions.has(['Connect', 'Speak'])) {
-                return interaction.editReply(
-                    '❌ VoiceX ko is voice channel mein Connect aur Speak permissions chahiye.'
-                );
-            }
+            await entersState(
+                session.connection,
+                VoiceConnectionStatus.Ready,
+                20000
+            );
 
-            let session;
-
-            try {
-                session = createSession(
-                    interaction.guild,
-                    voiceChannel
-                );
-
-                console.log('[JOIN] Waiting for Discord voice connection...');
-
-                await entersState(
-                    session.connection,
-                    VoiceConnectionStatus.Ready,
-                    30000
-                );
-
-                console.log('[JOIN] Voice connection READY!');
-
-                return interaction.editReply(
-                    `✅ VoiceX joined **${voiceChannel.name}**!`
-                );
-
-            } catch (error) {
-                console.error('[JOIN FAILED]', error);
-
-                if (session) {
-                    stopSpeech(session);
-                    session.connection.destroy();
-                    sessions.delete(guildId);
-                }
-
-                return interaction.editReply(
-                    `❌ Voice join failed: ${error.message}`
-                );
-            }
+            return interaction.editReply(
+                `✅ VoiceX joined **${voiceChannel.name}**!`
+            );
         }
 
         // LEAVE
@@ -655,7 +638,7 @@ client.on(Events.InteractionCreate, async interaction => {
         if (interaction.commandName === 'voices') {
             if (availableVoices.length === 0) {
                 return interaction.editReply(
-                    '❌ Cartesia voices load nahi hui. API key check karo.'
+                    '❌ ElevenLabs voices load nahi hui. API key aur account access check karo.'
                 );
             }
 
@@ -784,21 +767,6 @@ client.on(Events.MessageCreate, async message => {
 // Discord errors
 client.on(Events.Error, error => {
     console.error('Discord client error:', error);
-});
-
-// Discord voice gateway diagnostics
-client.on('raw', packet => {
-    if (
-        packet.t === 'VOICE_STATE_UPDATE' ||
-        packet.t === 'VOICE_SERVER_UPDATE'
-    ) {
-        console.log(`[DISCORD RAW] ${packet.t}`, {
-            guild_id: packet.d?.guild_id,
-            channel_id: packet.d?.channel_id,
-            endpoint: packet.d?.endpoint || null,
-            user_id: packet.d?.user_id
-        });
-    }
 });
 
 // Login
