@@ -1,25 +1,17 @@
 import 'dotenv/config';
+import { REST, Routes, SlashCommandBuilder } from 'discord.js';
 
-import {
-    REST,
-    Routes,
-    SlashCommandBuilder
-} from 'discord.js';
-
-const {
-    DISCORD_TOKEN,
-    CLIENT_ID
-} = process.env;
+const { DISCORD_TOKEN, CLIENT_ID } = process.env;
 
 if (!DISCORD_TOKEN || !CLIENT_ID) {
-    console.error('Missing Discord environment variables!');
+    console.error('Missing DISCORD_TOKEN or CLIENT_ID in .env');
     process.exit(1);
 }
 
 const commands = [
     new SlashCommandBuilder()
         .setName('join')
-        .setDescription('Join your voice channel'),
+        .setDescription('Join your current voice channel'),
 
     new SlashCommandBuilder()
         .setName('leave')
@@ -27,10 +19,9 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('tts')
-        .setDescription('Speak text using VoiceX')
+        .setDescription('Speak text using TTS')
         .addStringOption(option =>
-            option
-                .setName('text')
+            option.setName('text')
                 .setDescription('Text to speak')
                 .setRequired(true)
                 .setMaxLength(500)
@@ -38,18 +29,17 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('stop')
-        .setDescription('Stop current speech and clear queue'),
+        .setDescription('Stop speech and clear the queue'),
 
     new SlashCommandBuilder()
         .setName('voices')
-        .setDescription('Show available voices'),
+        .setDescription('List available Cartesia voices'),
 
     new SlashCommandBuilder()
         .setName('setvoice')
-        .setDescription('Change VoiceX voice')
+        .setDescription('Choose a Cartesia voice')
         .addStringOption(option =>
-            option
-                .setName('voice')
+            option.setName('voice')
                 .setDescription('Search and select a voice')
                 .setRequired(true)
                 .setAutocomplete(true)
@@ -57,32 +47,40 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('setnick')
-        .setDescription('Set your TTS display name')
+        .setDescription('Set your custom TTS display name; use reset to clear')
         .addStringOption(option =>
-            option
-                .setName('name')
-                .setDescription('Your TTS name, or reset')
+            option.setName('name')
+                .setDescription('Your TTS name (or reset)')
                 .setRequired(true)
                 .setMaxLength(32)
         ),
 
     new SlashCommandBuilder()
+        .setName('setlang')
+        .setDescription('Set this server TTS language')
+        .addStringOption(option =>
+            option.setName('language')
+                .setDescription('Choose language')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Hindi', value: 'hindi' },
+                    { name: 'Marathi', value: 'marathi' },
+                    { name: 'English', value: 'english' }
+                )
+        ),
+
+    new SlashCommandBuilder()
         .setName('about')
-        .setDescription('Show VoiceX information and your TTS name')
+        .setDescription('Show VoiceX information and your TTS settings')
 ].map(command => command.toJSON());
 
-const rest = new REST({ version: '10' })
-    .setToken(DISCORD_TOKEN);
+const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 try {
     console.log('Registering VoiceX commands...');
-
-    await rest.put(
-        Routes.applicationCommands(CLIENT_ID),
-        { body: commands }
-    );
-
-    console.log('All 8 commands registered!');
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    console.log(`All ${commands.length} VoiceX commands registered globally!`);
 } catch (error) {
     console.error('Command registration failed:', error);
+    process.exit(1);
 }
