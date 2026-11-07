@@ -19,7 +19,6 @@ import {
     entersState
 } from '@discordjs/voice';
 
-import Cartesia from '@cartesia/cartesia-js';
 import { spawn } from 'node:child_process';
 import ffmpegPath from 'ffmpeg-static';
 import fs from 'node:fs/promises';
@@ -28,24 +27,17 @@ import path from 'node:path';
 // Environment
 const {
     DISCORD_TOKEN,
-    CARTESIA_API_KEY
+    ELEVENLABS_API_KEY
 } = process.env;
 
-// Cartesia settings
-const MODEL_ID = 'sonic-3.6';
-const DEFAULT_LANGUAGE = 'hi';
+// ElevenLabs settings
+const MODEL_ID = 'eleven_multilingual_v2';
+const DEFAULT_VOICE_ID = '21m00Tcm4TlvDq8ikWAM';
 
-const SUPPORTED_LANGUAGES = {
-    hindi: { code: 'hi', label: 'Hindi' },
-    marathi: { code: 'mr', label: 'Marathi' },
-    english: { code: 'en', label: 'English' }
-};
-
-const DEFAULT_VOICE_ID = 'db6b0ed5-d5d3-463d-ae85-518a07d3c2b4';
 const SETTINGS_FILE = path.resolve('./voice-settings.json');
 
-if (!DISCORD_TOKEN || !CARTESIA_API_KEY) {
-    console.error('Missing Discord or Cartesia API key!');
+if (!DISCORD_TOKEN || !ELEVENLABS_API_KEY) {
+    console.error('Missing Discord or ElevenLabs API key!');
     process.exit(1);
 }
 
@@ -64,31 +56,16 @@ const client = new Client({
     ]
 });
 
-// Cartesia client
-const cartesia = new Cartesia({
-    apiKey: CARTESIA_API_KEY
-});
-
 // Data
 const sessions = new Map();
 const guildVoices = new Map();
 const guildNicknames = new Map();
-const guildLanguages = new Map();
 
 let availableVoices = [];
 
-// Helpers
+// Settings helpers
 function getNicknameKey(guildId, userId) {
     return `${guildId}:${userId}`;
-}
-
-function getGuildLanguage(guildId) {
-    return guildLanguages.get(guildId) || DEFAULT_LANGUAGE;
-}
-
-function getLanguageLabel(code) {
-    return Object.values(SUPPORTED_LANGUAGES)
-        .find(language => language.code === code)?.label || 'Hindi';
 }
 
 function getTTSName(member, guildId = member?.guild?.id) {
@@ -110,26 +87,13 @@ async function loadSettings() {
         const data = await fs.readFile(SETTINGS_FILE, 'utf8');
         const saved = JSON.parse(data);
 
-        if (
-            saved.guildVoices ||
-            saved.guildNicknames ||
-            saved.guildLanguages
-        ) {
+        if (saved.guildVoices || saved.guildNicknames) {
             for (const [id, voice] of Object.entries(saved.guildVoices || {})) {
                 guildVoices.set(id, voice);
             }
 
             for (const [id, name] of Object.entries(saved.guildNicknames || {})) {
                 guildNicknames.set(id, name);
-            }
-
-            for (const [id, language] of Object.entries(saved.guildLanguages || {})) {
-                if (
-                    Object.values(SUPPORTED_LANGUAGES)
-                        .some(item => item.code === language)
-                ) {
-                    guildLanguages.set(id, language);
-                }
             }
         } else {
             // Old settings compatibility
@@ -140,7 +104,7 @@ async function loadSettings() {
             }
         }
 
-        console.log('Voice, nickname and language settings loaded.');
+        console.log('Voice and nickname settings loaded.');
     } catch (error) {
         if (error.code !== 'ENOENT') {
             console.error('Settings error:', error.message);
@@ -152,8 +116,7 @@ async function loadSettings() {
 async function saveSettings() {
     const data = {
         guildVoices: Object.fromEntries(guildVoices),
-        guildNicknames: Object.fromEntries(guildNicknames),
-        guildLanguages: Object.fromEntries(guildLanguages)
+        guildNicknames: Object.fromEntries(guildNicknames)
     };
 
     await fs.writeFile(
@@ -163,30 +126,44 @@ async function saveSettings() {
     );
 }
 
-// Load Cartesia voices
-async function loadVoices() {
-    console.log('Loading Cartesia voices...');
-
-    try {
-        const voices = [];
-
-        for await (const voice of cartesia.voices.list()) {
-            if (voice.id && voice.name) {
-                voices.push({
-                    id: voice.id,
-                    name: voice.name,
-                    gender: voice.gender ||
-                        voice.metadata?.gender ||
-                        'unknown'
-                });
+// ElevenLabs API request helper
+async function elevenLabsRequest(endpoint, options = {}) {
+    const response = await fetch(
+        `https://api.elevenlabs.io/v1${endpoint}`,
+        {
+            ...options,
+            headers: {
+                'xi-api-key': ELEVENLABS_API_KEY,
+                ...options.headers
             }
         }
+    );
 
-        availableVoices = voices;
-
-        console.log(
-            `Loaded ${availableVoices.length} Cartesia voices.`
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(
+            `ElevenLabs API ${response.status}: ${errorText.slice(0, 500)}`
         );
+    }
+
+    return response;
+}
+
+// Load ElevenLabs voices
+async function loadVoices() {
+    console.log('Loading ElevenLabs voices...');
+
+    try {
+        const response = await elevenLabsRequest('/voices');
+        const data = await response.json();
+
+        availableVoices = (data.voices || []).map(voice => ({
+            id: voice.voice_id,
+            name: voice.name,
+            gender: voice.labels?.gender || 'unknown'
+        }));
+
+        console.log(`Loaded ${availableVoices.length} ElevenLabs voices.`);
     } catch (error) {
         console.error('Voice loading error:', error.message);
     }
@@ -205,23 +182,30 @@ function getGuildVoice(guildId) {
         || availableVoices[0];
 }
 
-// Generate speech
-async function generateSpeech(text, voiceId, language) {
-    const response = await cartesia.tts.generate({
-        model_id: MODEL_ID,
-        transcript: text,
-        voice: voiceId,
-        language,
-        output_format: {
-            container: 'wav',
-            encoding: 'pcm_s16le',
-            sample_rate: 44100
+// Generate speech with ElevenLabs
+async function generateSpeech(text, voiceId) {
+    const response = await elevenLabsRequest(
+        `/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
+        {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                text,
+                model_id: MODEL_ID,
+                language_code: 'hi',
+                voice_settings: {
+                    stability: 0.5,
+                    similarity_boost: 0.75,
+                    style: 0.2,
+                    use_speaker_boost: true
+                }
+            })
         }
-    });
+    );
 
-    const audioBlob = await response.blob();
-
-    return Buffer.from(await audioBlob.arrayBuffer());
+    return Buffer.from(await response.arrayBuffer());
 }
 
 // Play audio
@@ -289,24 +273,16 @@ async function processQueue(session) {
                 const voice = getGuildVoice(session.guildId);
 
                 if (!voice) {
-                    console.error('No available Cartesia voice.');
+                    console.error('No available ElevenLabs voice.');
                     continue;
                 }
 
-                const language = getGuildLanguage(session.guildId);
-
                 console.log(`Speaking with ${voice.name}:`, text);
-                console.log(`TTS language: ${getLanguageLabel(language)}`);
 
-                const audio = await generateSpeech(
-                    text,
-                    voice.id,
-                    language
-                );
+                const audio = await generateSpeech(text, voice.id);
 
                 if (
-                    session.connection.state.status ===
-                    VoiceConnectionStatus.Destroyed
+                    session.connection.state.status === VoiceConnectionStatus.Destroyed
                 ) {
                     break;
                 }
@@ -407,7 +383,7 @@ client.once(Events.ClientReady, async readyClient => {
     await loadVoices();
 
     console.log(`Available voices: ${availableVoices.length}`);
-    console.log('TTS Provider: Cartesia');
+    console.log('TTS Provider: ElevenLabs');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 });
 
@@ -423,7 +399,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const results = availableVoices
             .filter(voice =>
                 voice.name.toLowerCase().includes(focused) ||
-                (voice.gender || 'unknown').toLowerCase().includes(focused)
+                voice.gender.toLowerCase().includes(focused)
             )
             .slice(0, 25)
             .map(voice => ({
@@ -445,6 +421,7 @@ client.on(Events.InteractionCreate, async interaction => {
         // SET NICKNAME
         if (interaction.commandName === 'setnick') {
             const requestedName = interaction.options
+        
                 .getString('name', true)
                 .trim();
 
@@ -477,27 +454,6 @@ client.on(Events.InteractionCreate, async interaction => {
             );
         }
 
-        // SET LANGUAGE
-        if (interaction.commandName === 'setlang') {
-            const selectedLanguage = interaction.options
-                .getString('language', true);
-
-            const language = SUPPORTED_LANGUAGES[selectedLanguage];
-
-            if (!language) {
-                return interaction.editReply(
-                    '❌ Unsupported language. Choose Hindi, Marathi, or English.'
-                );
-            }
-
-            guildLanguages.set(guildId, language.code);
-            await saveSettings();
-
-            return interaction.editReply(
-                `✅ VoiceX language changed to **${language.label}** for this server!`
-            );
-        }
-
         // ABOUT
         if (interaction.commandName === 'about') {
             const member = await interaction.guild.members.fetch(
@@ -512,8 +468,7 @@ client.on(Events.InteractionCreate, async interaction => {
                     `**Your TTS name:** ${getTTSName(member, guildId)}`,
                     '**Name priority:** Custom TTS name → Server nickname → Discord username',
                     '',
-                    `**Language:** ${getLanguageLabel(getGuildLanguage(guildId))}`,
-                    '**TTS Provider:** Cartesia',
+                    '**TTS Provider:** ElevenLabs',
                     '**Made by Raxxy Developer**'
                 ].join('\n')
             });
@@ -610,33 +565,22 @@ client.on(Events.InteractionCreate, async interaction => {
         if (interaction.commandName === 'voices') {
             if (availableVoices.length === 0) {
                 return interaction.editReply(
-                    '❌ Cartesia voices load nahi hui. API key check karo.'
+                    '❌ ElevenLabs voices load nahi hui. API key check karo.'
                 );
             }
 
             const male = availableVoices
-                .filter(v =>
-                    ['masculine', 'male'].includes(
-                        (v.gender || 'unknown').toLowerCase()
-                    )
-                )
+                .filter(v => v.gender.toLowerCase() === 'male')
                 .map(v => `👨 ${v.name}`)
                 .slice(0, 20);
 
             const female = availableVoices
-                .filter(v =>
-                    ['feminine', 'female'].includes(
-                        (v.gender || 'unknown').toLowerCase()
-                    )
-                )
+                .filter(v => v.gender.toLowerCase() === 'female')
                 .map(v => `👩 ${v.name}`)
                 .slice(0, 20);
 
             const other = availableVoices
-                .filter(v =>
-                    !['male', 'female', 'masculine', 'feminine']
-                        .includes((v.gender || 'unknown').toLowerCase())
-                )
+                .filter(v => !['male', 'female'].includes(v.gender.toLowerCase()))
                 .map(v => `⚪ ${v.name}`)
                 .slice(0, 10);
 
@@ -654,8 +598,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 '**Other voices**',
                 other.join('\n') || 'No other voices found.',
                 '',
-                'Use `/setvoice` to change your voice.',
-                `Language: **${getLanguageLabel(getGuildLanguage(guildId))}** (change with /setlang)`
+                'Use `/setvoice` to change your voice.'
             ].join('\n');
 
             return interaction.editReply({
@@ -746,3 +689,4 @@ client.login(DISCORD_TOKEN).catch(error => {
     console.error('Discord login failed:', error.message);
     process.exit(1);
 });
+
