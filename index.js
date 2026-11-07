@@ -772,6 +772,25 @@ process.on('unhandledRejection', error => {
 });
 
 // ─── LOGIN ──────────────────────────────────────
+// ─── DISCORD VOICE GATEWAY DEBUG ─────────────────
+client.on('raw', packet => {
+    if (
+        packet.t === 'VOICE_STATE_UPDATE' ||
+        packet.t === 'VOICE_SERVER_UPDATE'
+    ) {
+        console.log(`[DISCORD RAW] ${packet.t}`, {
+            guild_id: packet.d.guild_id,
+            channel_id: packet.d.channel_id,
+            user_id: packet.d.user_id,
+            endpoint: packet.d.endpoint
+        });
+    }
+});
+
+client.login(DISCORD_TOKEN).catch(error => {
+    console.error('Discord login failed:', error);
+    process.exit(1);
+});
 
 client.login(DISCORD_TOKEN).catch(error => {
     console.error('Discord login failed:', error);
