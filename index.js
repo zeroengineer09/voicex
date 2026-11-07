@@ -364,6 +364,13 @@ function createSession(guild, voiceChannel) {
         selfMute: false,
         debug: true
     });
+    connection.on('debug', message => {
+    console.log('[VOICE DEBUG]', message);
+});
+
+connection.on('stateChange', (oldState, newState) => {
+    console.log(`[VOICE STATE] ${oldState.status} -> ${newState.status}`);
+});
 
     const player = createAudioPlayer({
         behaviors: {
