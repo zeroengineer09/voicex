@@ -376,6 +376,7 @@ client.once(Events.ClientReady, async readyClient => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('       VOICEX BOT ONLINE');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('ELEVENLABS VERSION ACTIVE');
 
     console.log(`Bot: ${readyClient.user.tag}`);
 
