@@ -688,3 +688,4 @@ client.login(DISCORD_TOKEN).catch(error => {
     console.error('Discord login failed:', error.message);
     process.exit(1);
 });
+
