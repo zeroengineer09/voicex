@@ -49,7 +49,7 @@ if (!ffmpegPath) {
     process.exit(1);
 }
 
-const cartesia = new Cartesia({ apiKey: CARTESIA_API_KEY });
+const cartesia = new Cartesia({ token: CARTESIA_API_KEY });
 
 const client = new Client({
     intents: [
