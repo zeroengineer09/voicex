@@ -1,11 +1,11 @@
-
 import 'dotenv/config';
 
 import {
     Client,
     GatewayIntentBits,
     Events,
-    ChannelType
+    ChannelType,
+    PermissionFlagsBits
 } from 'discord.js';
 
 import {
@@ -25,21 +25,14 @@ import ffmpegPath from 'ffmpeg-static';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-// ==========================================
-// ENVIRONMENT
-// ==========================================
+// ─── CONFIG ─────────────────────────────────────
 
-const {
-    DISCORD_TOKEN,
-    CARTESIA_API_KEY
-} = process.env;
+const { DISCORD_TOKEN, CARTESIA_API_KEY } = process.env;
 
 const MODEL_ID = 'sonic-3.6';
-
-const DEFAULT_VOICE_ID =
-    'db6b0ed5-d5d3-463d-ae85-518a07d3c2b4';
-
 const DEFAULT_LANGUAGE = 'hi';
+const DEFAULT_VOICE_ID = 'db6b0ed5-d5d3-463d-ae85-518a07d3c2b4';
+const SETTINGS_FILE = path.resolve('./voice-settings.json');
 
 const SUPPORTED_LANGUAGES = {
     hindi: { code: 'hi', label: 'Hindi' },
@@ -47,26 +40,17 @@ const SUPPORTED_LANGUAGES = {
     english: { code: 'en', label: 'English' }
 };
 
-const SETTINGS_FILE = path.resolve('./voice-settings.json');
-
 if (!DISCORD_TOKEN || !CARTESIA_API_KEY) {
-    console.error('Missing DISCORD_TOKEN or CARTESIA_API_KEY!');
+    console.error('Missing DISCORD_TOKEN or CARTESIA_API_KEY.');
     process.exit(1);
 }
 
 if (!ffmpegPath) {
-    console.error('FFmpeg not found!');
+    console.error('FFmpeg binary not found.');
     process.exit(1);
 }
 
-// Cartesia client
-const cartesia = new Cartesia({
-    token: CARTESIA_API_KEY
-});
-
-// ==========================================
-// DISCORD CLIENT
-// ==========================================
+// ─── CLIENTS ────────────────────────────────────
 
 const client = new Client({
     intents: [
@@ -77,42 +61,24 @@ const client = new Client({
     ]
 });
 
-// ==========================================
-// DATA
-// ==========================================
+const cartesia = new Cartesia({
+    token: CARTESIA_API_KEY
+});
+
+// ─── DATA ───────────────────────────────────────
 
 const sessions = new Map();
-
 const guildVoices = new Map();
 const guildNicknames = new Map();
 const guildLanguages = new Map();
 
 let availableVoices = [];
 
-// ==========================================
-// NAME HELPERS
-// ==========================================
+// ─── HELPERS ────────────────────────────────────
 
-function getNicknameKey(guildId, userId) {
+function nicknameKey(guildId, userId) {
     return `${guildId}:${userId}`;
 }
-
-function getTTSName(member, guildId = member?.guild?.id) {
-    if (!member || !guildId) return 'Someone';
-
-    const customName = guildNicknames.get(
-        getNicknameKey(guildId, member.id)
-    );
-
-    return customName ||
-        member.displayName ||
-        member.user.globalName ||
-        member.user.username;
-}
-
-// ==========================================
-// LANGUAGE HELPERS
-// ==========================================
 
 function getGuildLanguage(guildId) {
     return guildLanguages.get(guildId) || DEFAULT_LANGUAGE;
@@ -120,58 +86,55 @@ function getGuildLanguage(guildId) {
 
 function getLanguageLabel(code) {
     return Object.values(SUPPORTED_LANGUAGES)
-        .find(language => language.code === code)?.label || 'Hindi';
+        .find(item => item.code === code)?.label || 'Hindi';
 }
 
-// ==========================================
-// SETTINGS
-// ==========================================
+function getTTSName(member, guildId = member?.guild?.id) {
+    if (!member || !guildId) return 'Someone';
+
+    return guildNicknames.get(nicknameKey(guildId, member.id))
+        || member.displayName
+        || member.user.globalName
+        || member.user.username;
+}
+
+// ─── SETTINGS ───────────────────────────────────
 
 async function loadSettings() {
     try {
-        const data = await fs.readFile(
-            SETTINGS_FILE,
-            'utf8'
+        const saved = JSON.parse(
+            await fs.readFile(SETTINGS_FILE, 'utf8')
         );
-
-        const saved = JSON.parse(data);
 
         if (
             saved.guildVoices ||
             saved.guildNicknames ||
             saved.guildLanguages
         ) {
-            for (const [id, voice] of Object.entries(
-                saved.guildVoices || {}
-            )) {
-                guildVoices.set(id, voice);
+            for (const [id, value] of Object.entries(saved.guildVoices || {})) {
+                guildVoices.set(id, value);
             }
 
-            for (const [id, name] of Object.entries(
-                saved.guildNicknames || {}
-            )) {
-                guildNicknames.set(id, name);
+            for (const [id, value] of Object.entries(saved.guildNicknames || {})) {
+                guildNicknames.set(id, value);
             }
 
-            for (const [id, language] of Object.entries(
-                saved.guildLanguages || {}
-            )) {
-                guildLanguages.set(id, language);
+            for (const [id, value] of Object.entries(saved.guildLanguages || {})) {
+                if (Object.values(SUPPORTED_LANGUAGES).some(x => x.code === value)) {
+                    guildLanguages.set(id, value);
+                }
             }
         } else {
             // Old settings compatibility
-            for (const [id, voice] of Object.entries(saved || {})) {
-                if (typeof voice === 'string') {
-                    guildVoices.set(id, voice);
-                }
+            for (const [id, value] of Object.entries(saved || {})) {
+                if (typeof value === 'string') guildVoices.set(id, value);
             }
         }
 
-        console.log('Voice, nickname and language settings loaded.');
-
+        console.log('Settings loaded.');
     } catch (error) {
         if (error.code !== 'ENOENT') {
-            console.error('Settings load error:', error.message);
+            console.error('Settings load error:', error);
         }
     }
 }
@@ -190,9 +153,7 @@ async function saveSettings() {
     );
 }
 
-// ==========================================
-// CARTESIA VOICES
-// ==========================================
+// ─── CARTESIA VOICES ────────────────────────────
 
 async function loadVoices() {
     console.log('Loading Cartesia voices...');
@@ -201,58 +162,40 @@ async function loadVoices() {
         const voices = [];
 
         for await (const voice of cartesia.voices.list()) {
+            if (!voice.id || !voice.name) continue;
+
             voices.push({
                 id: voice.id,
-                name: voice.name || 'Unnamed voice',
-                gender: voice.gender ||
-                    voice.metadata?.gender ||
-                    'unknown'
+                name: voice.name,
+                gender: voice.gender
+                    || voice.metadata?.gender
+                    || 'unknown'
             });
         }
 
         availableVoices = voices;
-
-        console.log(
-            `Loaded ${availableVoices.length} Cartesia voices.`
-        );
-
+        console.log(`Loaded ${voices.length} Cartesia voices.`);
     } catch (error) {
-        console.error(
-            'Cartesia voice loading error:',
-            error.message
-        );
+        console.error('Cartesia voice loading error:', error);
     }
 }
 
 function getGuildVoice(guildId) {
     const savedId = guildVoices.get(guildId);
 
-    if (savedId) {
-        const voice = availableVoices.find(
-            v => v.id === savedId
-        );
-
-        if (voice) return voice;
-    }
-
-    return availableVoices.find(
-        v => v.id === DEFAULT_VOICE_ID
-    ) || availableVoices[0];
+    return availableVoices.find(v => v.id === savedId)
+        || availableVoices.find(v => v.id === DEFAULT_VOICE_ID)
+        || availableVoices[0];
 }
 
-// ==========================================
-// CARTESIA SPEECH GENERATION
-// ==========================================
+// ─── GENERATE SPEECH ────────────────────────────
 
 async function generateSpeech(text, voiceId, language) {
-    console.log(`Generating speech in ${language}...`);
-
     const response = await cartesia.tts.generate({
         model_id: MODEL_ID,
         transcript: text,
         voice: voiceId,
         language,
-
         output_format: {
             container: 'wav',
             encoding: 'pcm_s16le',
@@ -260,183 +203,72 @@ async function generateSpeech(text, voiceId, language) {
         }
     });
 
-    const audioBlob = await response.blob();
-
-    const audioBuffer = Buffer.from(
-        await audioBlob.arrayBuffer()
-    );
-
-    if (!audioBuffer.length) {
-        throw new Error('Cartesia returned empty audio.');
-    }
-
-    console.log(
-        `Generated audio: ${audioBuffer.length} bytes`
-    );
-
-    return audioBuffer;
+    const blob = await response.blob();
+    return Buffer.from(await blob.arrayBuffer());
 }
 
-// ==========================================
-// AUDIO PLAYBACK
-// ==========================================
+// ─── PLAY AUDIO ─────────────────────────────────
 
 async function playAudio(session, audioBuffer) {
-    return new Promise((resolve, reject) => {
-
-        const ffmpeg = spawn(ffmpegPath, [
-            '-hide_banner',
-            '-loglevel', 'error',
-
-            '-i', 'pipe:0',
-
-            '-f', 's16le',
-            '-ar', '48000',
-            '-ac', '2',
-
-            'pipe:1'
-        ]);
-
-        session.ffmpeg = ffmpeg;
-
-        let started = false;
-        let finished = false;
-        let stderrOutput = '';
-
-        let timeout;
-
-        const cleanup = () => {
-            clearTimeout(timeout);
-
-            if (session.ffmpeg === ffmpeg) {
-                session.ffmpeg = null;
-            }
-
-            session.player.removeListener(
-                'stateChange',
-                onStateChange
-            );
-
-            session.player.removeListener(
-                'error',
-                onPlayerError
-            );
-
-            if (!ffmpeg.killed) {
-                ffmpeg.kill();
-            }
-        };
-
-        const finish = (error = null) => {
-            if (finished) return;
-
-            finished = true;
-
-            cleanup();
-
-            if (error) {
-                reject(error);
-            } else {
-                resolve();
-            }
-        };
-
-        const onStateChange = (oldState, newState) => {
-
-            console.log(
-                `Player: ${oldState.status} -> ${newState.status}`
-            );
-
-            if (
-                newState.status === AudioPlayerStatus.Playing
-            ) {
-                started = true;
-
-                console.log('Audio playback started.');
-            }
-
-            if (
-                started &&
-                newState.status === AudioPlayerStatus.Idle
-            ) {
-                console.log('Audio playback completed.');
-
-                finish();
-            }
-        };
-
-        const onPlayerError = error => {
-            finish(
-                new Error(`Audio player error: ${error.message}`)
-            );
-        };
-
-        session.player.on(
-            'stateChange',
-            onStateChange
-        );
-
-        session.player.on(
-            'error',
-            onPlayerError
-        );
-
-        ffmpeg.stderr.on('data', data => {
-            stderrOutput += data.toString();
-
-            console.error(
-                'FFmpeg:',
-                data.toString()
-            );
-        });
-
-        ffmpeg.on('error', error => {
-            finish(
-                new Error(`FFmpeg spawn error: ${error.message}`)
-            );
-        });
-
-        ffmpeg.on('close', code => {
-            if (code !== 0 && !finished) {
-                finish(
-                    new Error(
-                        `FFmpeg exited with code ${code}: ${stderrOutput}`
-                    )
-                );
-            }
-        });
-
-        timeout = setTimeout(() => {
-
-            const message = started
-                ? 'Audio playback timed out.'
-                : 'Audio player did not start. Check voice connection and FFmpeg output.';
-
-            finish(new Error(message));
-
-        }, 60000);
-
-        try {
-            const resource = createAudioResource(
-                ffmpeg.stdout,
-                {
-                    inputType: StreamType.Raw
-                }
-            );
-
-            session.player.play(resource);
-
-            ffmpeg.stdin.end(audioBuffer);
-
-        } catch (error) {
-            finish(error);
-        }
+    const ffmpeg = spawn(ffmpegPath, [
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-i', 'pipe:0',
+        '-f', 's16le',
+        '-ar', '48000',
+        '-ac', '2',
+        'pipe:1'
+    ], {
+        stdio: ['pipe', 'pipe', 'pipe']
     });
+
+    session.ffmpeg = ffmpeg;
+
+    let ffmpegError = '';
+
+    ffmpeg.stderr.on('data', data => {
+        ffmpegError += data.toString();
+    });
+
+    ffmpeg.on('error', error => {
+        console.error('FFmpeg process error:', error);
+    });
+
+    const resource = createAudioResource(ffmpeg.stdout, {
+        inputType: StreamType.Raw
+    });
+
+    session.player.play(resource);
+    ffmpeg.stdin.end(audioBuffer);
+
+    try {
+        await entersState(
+            session.player,
+            AudioPlayerStatus.Playing,
+            15000
+        );
+
+        await entersState(
+            session.player,
+            AudioPlayerStatus.Idle,
+            120000
+        );
+
+        if (ffmpegError.trim()) {
+            console.error('FFmpeg:', ffmpegError);
+        }
+    } finally {
+        if (session.ffmpeg === ffmpeg) {
+            session.ffmpeg = null;
+        }
+
+        if (!ffmpeg.killed) {
+            ffmpeg.kill();
+        }
+    }
 }
 
-// ==========================================
-// SPEECH QUEUE
-// ==========================================
+// ─── SPEECH QUEUE ───────────────────────────────
 
 async function processQueue(session) {
     if (session.processing) return;
@@ -445,11 +277,9 @@ async function processQueue(session) {
 
     try {
         while (
-            session.queue.length > 0 &&
-            session.connection.state.status !==
-                VoiceConnectionStatus.Destroyed
+            session.queue.length &&
+            session.connection.state.status !== VoiceConnectionStatus.Destroyed
         ) {
-
             const text = session.queue.shift();
 
             try {
@@ -460,14 +290,10 @@ async function processQueue(session) {
                     continue;
                 }
 
-                const language = getGuildLanguage(
-                    session.guildId
-                );
+                const language = getGuildLanguage(session.guildId);
 
-                console.log(
-                    `Speaking with ${voice.name} (${language}):`,
-                    text
-                );
+                console.log(`Speaking: ${text}`);
+                console.log(`Voice: ${voice.name} | Language: ${language}`);
 
                 const audio = await generateSpeech(
                     text,
@@ -478,27 +304,19 @@ async function processQueue(session) {
                 if (
                     session.connection.state.status ===
                     VoiceConnectionStatus.Destroyed
-                ) {
-                    break;
-                }
+                ) break;
 
                 await playAudio(session, audio);
-
             } catch (error) {
-                console.error(
-                    'Speech generation/playback error:',
-                    error
-                );
+                console.error('Speech error:', error);
             }
         }
-
     } finally {
         session.processing = false;
 
         if (
-            session.queue.length > 0 &&
-            session.connection.state.status !==
-                VoiceConnectionStatus.Destroyed
+            session.queue.length &&
+            session.connection.state.status !== VoiceConnectionStatus.Destroyed
         ) {
             processQueue(session);
         }
@@ -506,16 +324,11 @@ async function processQueue(session) {
 }
 
 function enqueueSpeech(session, text) {
-    if (!text || !text.trim()) return;
+    if (!text?.trim()) return;
 
     session.queue.push(text.trim());
-
     processQueue(session);
 }
-
-// ==========================================
-// STOP SPEECH
-// ==========================================
 
 function stopSpeech(session) {
     session.queue = [];
@@ -528,26 +341,28 @@ function stopSpeech(session) {
     session.player.stop(true);
 }
 
-// ==========================================
-// CREATE VOICE SESSION
-// ==========================================
+// ─── VOICE SESSION ──────────────────────────────
 
 function createSession(guild, voiceChannel) {
-
     const oldSession = sessions.get(guild.id);
 
     if (oldSession) {
         stopSpeech(oldSession);
-        oldSession.connection.destroy();
+
+        if (oldSession.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+            oldSession.connection.destroy();
+        }
+
+        sessions.delete(guild.id);
     }
 
     const connection = joinVoiceChannel({
         channelId: voiceChannel.id,
         guildId: guild.id,
         adapterCreator: guild.voiceAdapterCreator,
-
         selfDeaf: false,
-        selfMute: false
+        selfMute: false,
+        debug: true
     });
 
     const player = createAudioPlayer({
@@ -571,73 +386,49 @@ function createSession(guild, voiceChannel) {
 
     connection.on('stateChange', (oldState, newState) => {
         console.log(
-            `Voice connection: ${oldState.status} -> ${newState.status}`
+            `[VOICE STATE] ${oldState.status} -> ${newState.status}`
         );
+    });
+
+    connection.on('debug', message => {
+        console.log('[VOICE DEBUG]', message);
     });
 
     connection.on('error', error => {
-        console.error(
-            'Voice connection error:',
-            error.message
-        );
-    });
-
-    player.on('stateChange', (oldState, newState) => {
-        console.log(
-            `Audio player: ${oldState.status} -> ${newState.status}`
-        );
+        console.error('[VOICE ERROR]', error);
     });
 
     player.on('error', error => {
-        console.error(
-            'Audio player error:',
-            error.message
-        );
+        console.error('[PLAYER ERROR]', error);
     });
 
     return session;
 }
 
-// ==========================================
-// BOT READY
-// ==========================================
+// ─── BOT READY ─────────────────────────────────
 
 client.once(Events.ClientReady, async readyClient => {
-
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('       VOICEX BOT ONLINE');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-
     console.log(`Bot: ${readyClient.user.tag}`);
 
     await loadSettings();
     await loadVoices();
 
-    console.log(
-        `Available Cartesia voices: ${availableVoices.length}`
-    );
-
-    console.log(
-        `TTS Provider: Cartesia (${MODEL_ID})`
-    );
-
+    console.log(`Available voices: ${availableVoices.length}`);
+    console.log('TTS Provider: Cartesia');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 });
 
-// ==========================================
-// INTERACTIONS
-// ==========================================
+// ─── INTERACTIONS ───────────────────────────────
 
 client.on(Events.InteractionCreate, async interaction => {
-
-    // VOICE AUTOCOMPLETE
+    // Voice autocomplete
     if (interaction.isAutocomplete()) {
-
         if (interaction.commandName !== 'setvoice') return;
 
-        const focused = interaction.options
-            .getFocused()
-            .toLowerCase();
+        const focused = interaction.options.getFocused().toLowerCase();
 
         const results = availableVoices
             .filter(voice =>
@@ -654,128 +445,83 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (!interaction.isChatInputCommand()) return;
-
     if (!interaction.guild) return;
 
-    const guildId = interaction.guild.id;
+    const guild = interaction.guild;
+    const guildId = guild.id;
 
     try {
         await interaction.deferReply();
 
-        // ======================================
         // SET NICKNAME
-        // ======================================
-
         if (interaction.commandName === 'setnick') {
+            const name = interaction.options.getString('name', true).trim();
+            const key = nicknameKey(guildId, interaction.user.id);
 
-            const requestedName = interaction.options
-                .getString('name', true)
-                .trim();
-
-            const key = getNicknameKey(
-                guildId,
-                interaction.user.id
-            );
-
-            if (requestedName.toLowerCase() === 'reset') {
-
+            if (name.toLowerCase() === 'reset') {
                 guildNicknames.delete(key);
-
                 await saveSettings();
 
-                const member = await interaction.guild.members.fetch(
-                    interaction.user.id
-                );
+                const member = await guild.members.fetch(interaction.user.id);
 
                 return interaction.editReply(
                     `✅ Custom TTS name reset. VoiceX will now say **${member.displayName}**.`
                 );
             }
 
-            if (
-                !requestedName ||
-                requestedName.length > 32
-            ) {
+            if (!name || name.length > 32) {
                 return interaction.editReply(
                     '❌ Name must be between 1 and 32 characters.'
                 );
             }
 
-            guildNicknames.set(key, requestedName);
-
+            guildNicknames.set(key, name);
             await saveSettings();
 
             return interaction.editReply(
-                `✅ Your TTS name is now **${requestedName}**!`
+                `✅ Your TTS name is now **${name}**!`
             );
         }
 
-        // ======================================
         // SET LANGUAGE
-        // ======================================
-
         if (interaction.commandName === 'setlang') {
-
-            const selected = interaction.options
-                .getString('language', true);
-
+            const selected = interaction.options.getString('language', true);
             const language = SUPPORTED_LANGUAGES[selected];
 
             if (!language) {
-                return interaction.editReply(
-                    '❌ Unsupported language.'
-                );
+                return interaction.editReply('❌ Unsupported language.');
             }
 
-            guildLanguages.set(
-                guildId,
-                language.code
-            );
-
+            guildLanguages.set(guildId, language.code);
             await saveSettings();
 
             return interaction.editReply(
-                `✅ Server TTS language set to **${language.label}**.`
+                `✅ VoiceX language changed to **${language.label}**!`
             );
         }
 
-        // ======================================
         // ABOUT
-        // ======================================
-
         if (interaction.commandName === 'about') {
-
-            const member = await interaction.guild.members.fetch(
-                interaction.user.id
-            );
-
-            const voice = getGuildVoice(guildId);
+            const member = await guild.members.fetch(interaction.user.id);
 
             return interaction.editReply({
                 content: [
                     '**🎧 VoiceX — Discord TTS Bot**',
-                    'Converts messages in the connected voice channel into speech.',
+                    'Converts messages into voice audio in your server.',
                     '',
                     `**Your TTS name:** ${getTTSName(member, guildId)}`,
-                    '**Name priority:** Custom TTS name → Server nickname → Global name → Username',
-                    `**Server language:** ${getLanguageLabel(getGuildLanguage(guildId))}`,
-                    `**Selected voice:** ${voice?.name || 'Default'}`,
-                    '**TTS Provider:** Cartesia Sonic 3.6',
+                    '**Name priority:** Custom name → Server nickname → Discord username',
+                    '',
+                    `**Language:** ${getLanguageLabel(getGuildLanguage(guildId))}`,
+                    '**TTS Provider:** Cartesia',
                     '**Made by Raxxy Developer**'
                 ].join('\n')
             });
         }
 
-        // ======================================
         // JOIN
-        // ======================================
-
         if (interaction.commandName === 'join') {
-
-            const member = await interaction.guild.members.fetch(
-                interaction.user.id
-            );
-
+            const member = await guild.members.fetch(interaction.user.id);
             const voiceChannel = member.voice.channel;
 
             if (!voiceChannel) {
@@ -784,50 +530,61 @@ client.on(Events.InteractionCreate, async interaction => {
                 );
             }
 
-            const session = createSession(
-                interaction.guild,
-                voiceChannel
-            );
+            const botMember = await guild.members.fetchMe();
+            const permissions = voiceChannel.permissionsFor(botMember);
+
+            const required = [
+                [PermissionFlagsBits.ViewChannel, 'View Channel'],
+                [PermissionFlagsBits.Connect, 'Connect'],
+                [PermissionFlagsBits.Speak, 'Speak']
+            ];
+
+            const missing = required
+                .filter(([permission]) => !permissions?.has(permission))
+                .map(([, name]) => name);
+
+            if (missing.length) {
+                return interaction.editReply(
+                    `❌ Bot ke paas ye permissions missing hain: **${missing.join(', ')}**`
+                );
+            }
+
+            const session = createSession(guild, voiceChannel);
 
             try {
-
                 await entersState(
                     session.connection,
                     VoiceConnectionStatus.Ready,
                     30000
                 );
-
-                return interaction.editReply(
-                    `✅ VoiceX joined **${voiceChannel.name}**!`
-                );
-
             } catch (error) {
+                const failedState = session.connection.state.status;
 
                 console.error(
-                    'Voice connection failed:',
-                    error.message,
-                    'Current state:',
-                    session.connection.state.status
+                    `Voice join failed. State: ${failedState}`,
+                    error
                 );
 
-                stopSpeech(session);
+                if (session.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+                    session.connection.destroy();
+                }
 
-                session.connection.destroy();
-
-                sessions.delete(guildId);
+                if (sessions.get(guildId) === session) {
+                    sessions.delete(guildId);
+                }
 
                 return interaction.editReply(
-                    '❌ Voice connection failed. Check bot permissions (Connect and Speak), Discord voice connection and Railway logs.'
+                    `❌ Voice connection failed. State: **${failedState}**. Railway logs check karo.`
                 );
             }
+
+            return interaction.editReply(
+                `✅ VoiceX successfully joined **${voiceChannel.name}**!`
+            );
         }
 
-        // ======================================
         // LEAVE
-        // ======================================
-
         if (interaction.commandName === 'leave') {
-
             const session = sessions.get(guildId);
 
             if (!session) {
@@ -838,49 +595,36 @@ client.on(Events.InteractionCreate, async interaction => {
 
             stopSpeech(session);
 
-            session.connection.destroy();
+            if (session.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+                session.connection.destroy();
+            }
 
             sessions.delete(guildId);
 
-            return interaction.editReply(
-                '👋 VoiceX left the voice channel.'
-            );
+            return interaction.editReply('👋 VoiceX left the voice channel.');
         }
 
-        // ======================================
         // TTS
-        // ======================================
-
         if (interaction.commandName === 'tts') {
-
             const session = sessions.get(guildId);
 
             if (!session) {
-                return interaction.editReply(
-                    '❌ Pehle /join use karo!'
-                );
+                return interaction.editReply('❌ Pehle /join use karo!');
             }
 
-            const text = interaction.options.getString(
-                'text',
-                true
-            );
+            const text = interaction.options.getString('text', true);
 
             enqueueSpeech(session, text);
 
             const voice = getGuildVoice(guildId);
 
             return interaction.editReply(
-                `🔊 Added to queue! Voice: **${voice?.name || 'Default'}** | Language: **${getLanguageLabel(getGuildLanguage(guildId))}**`
+                `🔊 Added to queue! Voice: **${voice?.name || 'Default'}**`
             );
         }
 
-        // ======================================
         // STOP
-        // ======================================
-
         if (interaction.commandName === 'stop') {
-
             const session = sessions.get(guildId);
 
             if (!session) {
@@ -896,64 +640,45 @@ client.on(Events.InteractionCreate, async interaction => {
             );
         }
 
-        // ======================================
         // VOICES
-        // ======================================
-
         if (interaction.commandName === 'voices') {
-
-            if (availableVoices.length === 0) {
+            if (!availableVoices.length) {
                 return interaction.editReply(
-                    '❌ Cartesia voices load nahi hui. Railway logs/API key check karo.'
+                    '❌ Cartesia voices load nahi hui. API key check karo.'
                 );
             }
 
-            const groups = {
+            const male = availableVoices
+                .filter(v => ['masculine', 'male'].includes(v.gender.toLowerCase()))
+                .slice(0, 20)
+                .map(v => `👨 ${v.name}`);
 
-                male: availableVoices.filter(v =>
-                    ['male', 'masculine'].includes(
-                        v.gender.toLowerCase()
-                    )
-                ),
+            const female = availableVoices
+                .filter(v => ['feminine', 'female'].includes(v.gender.toLowerCase()))
+                .slice(0, 20)
+                .map(v => `👩 ${v.name}`);
 
-                female: availableVoices.filter(v =>
-                    ['female', 'feminine'].includes(
-                        v.gender.toLowerCase()
-                    )
-                ),
-
-                other: availableVoices.filter(v =>
-                    ![
-                        'male',
-                        'masculine',
-                        'female',
-                        'feminine'
-                    ].includes(v.gender.toLowerCase())
-                )
-            };
+            const other = availableVoices
+                .filter(v => !['male', 'female', 'masculine', 'feminine'].includes(v.gender.toLowerCase()))
+                .slice(0, 10)
+                .map(v => `⚪ ${v.name}`);
 
             const currentVoice = getGuildVoice(guildId);
 
             const description = [
                 `**Currently selected:** ${currentVoice?.name || 'Default'}`,
-                `**Language:** ${getLanguageLabel(getGuildLanguage(guildId))}`,
                 '',
                 '**Male voices**',
-                groups.male.slice(0, 15)
-                    .map(v => `👨 ${v.name}`)
-                    .join('\n') || 'No male voices found.',
+                male.join('\n') || 'No male voices found.',
                 '',
                 '**Female voices**',
-                groups.female.slice(0, 15)
-                    .map(v => `👩 ${v.name}`)
-                    .join('\n') || 'No female voices found.',
+                female.join('\n') || 'No female voices found.',
                 '',
                 '**Other voices**',
-                groups.other.slice(0, 10)
-                    .map(v => `⚪ ${v.name}`)
-                    .join('\n') || 'No other voices found.',
+                other.join('\n') || 'No other voices found.',
                 '',
-                'Use `/setvoice` to change your voice.'
+                'Use `/setvoice` to change your voice.',
+                `Language: **${getLanguageLabel(getGuildLanguage(guildId))}**`
             ].join('\n');
 
             return interaction.editReply({
@@ -961,20 +686,10 @@ client.on(Events.InteractionCreate, async interaction => {
             });
         }
 
-        // ======================================
         // SET VOICE
-        // ======================================
-
         if (interaction.commandName === 'setvoice') {
-
-            const voiceId = interaction.options.getString(
-                'voice',
-                true
-            );
-
-            const selectedVoice = availableVoices.find(
-                v => v.id === voiceId
-            );
+            const voiceId = interaction.options.getString('voice', true);
+            const selectedVoice = availableVoices.find(v => v.id === voiceId);
 
             if (!selectedVoice) {
                 return interaction.editReply(
@@ -982,11 +697,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 );
             }
 
-            guildVoices.set(
-                guildId,
-                selectedVoice.id
-            );
-
+            guildVoices.set(guildId, selectedVoice.id);
             await saveSettings();
 
             return interaction.editReply(
@@ -995,11 +706,9 @@ client.on(Events.InteractionCreate, async interaction => {
         }
 
     } catch (error) {
-
         console.error('Command error:', error);
 
         if (interaction.deferred || interaction.replied) {
-
             await interaction.editReply(
                 `❌ Error: ${error.message}`
             ).catch(() => {});
@@ -1007,62 +716,36 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 });
 
-// ==========================================
-// AUTOMATIC VOICE CHANNEL TEXT READING
-// ==========================================
+// ─── AUTO TTS: VOICE CHANNEL TEXT CHAT ──────────
 
 client.on(Events.MessageCreate, async message => {
-
-    if (message.author.bot) return;
-
-    if (!message.guild) return;
-
+    if (message.author.bot || !message.guild) return;
     if (!message.content.trim()) return;
 
     const session = sessions.get(message.guild.id);
-
     if (!session) return;
 
-    if (message.channel.type !== ChannelType.GuildVoice) {
-        return;
-    }
+    if (message.channel.type !== ChannelType.GuildVoice) return;
 
-    if (
-        message.channel.id !==
-        session.connection.joinConfig.channelId
-    ) {
+    if (message.channel.id !== session.connection.joinConfig.channelId) {
         return;
     }
 
     try {
+        const member = message.member
+            || await message.guild.members.fetch(message.author.id);
 
-        const member = message.member ||
-            await message.guild.members.fetch(
-                message.author.id
-            );
-
-        const displayName = getTTSName(
-            member,
-            message.guild.id
-        );
-
-        const text = `${displayName} says: ${message.content}`;
+        const displayName = getTTSName(member, message.guild.id);
 
         enqueueSpeech(
             session,
-            text.slice(0, 500)
+            `${displayName} says: ${message.content}`.slice(0, 500)
         );
-
     } catch (error) {
+        console.error('Display name error:', error);
 
-        console.error(
-            'Display name error:',
-            error.message
-        );
-
-        const fallback =
-            message.author.globalName ||
-            message.author.username;
+        const fallback = message.author.globalName
+            || message.author.username;
 
         enqueueSpeech(
             session,
@@ -1071,24 +754,19 @@ client.on(Events.MessageCreate, async message => {
     }
 });
 
-// ==========================================
-// DISCORD ERRORS
-// ==========================================
+// ─── ERROR HANDLING ─────────────────────────────
 
 client.on(Events.Error, error => {
     console.error('Discord client error:', error);
 });
 
-// ==========================================
-// LOGIN
-// ==========================================
+process.on('unhandledRejection', error => {
+    console.error('Unhandled rejection:', error);
+});
+
+// ─── LOGIN ──────────────────────────────────────
 
 client.login(DISCORD_TOKEN).catch(error => {
-
-    console.error(
-        'Discord login failed:',
-        error.message
-    );
-
+    console.error('Discord login failed:', error);
     process.exit(1);
 });
