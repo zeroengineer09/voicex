@@ -8,11 +8,10 @@ import {
 
 const {
     DISCORD_TOKEN,
-    CLIENT_ID,
-    GUILD_ID
+    CLIENT_ID
 } = process.env;
 
-if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID) {
+if (!DISCORD_TOKEN || !CLIENT_ID) {
     console.error('Missing Discord environment variables!');
     process.exit(1);
 }
@@ -43,7 +42,7 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('voices')
-        .setDescription('Show available male and female voices'),
+        .setDescription('Show available voices'),
 
     new SlashCommandBuilder()
         .setName('setvoice')
@@ -54,7 +53,22 @@ const commands = [
                 .setDescription('Search and select a voice')
                 .setRequired(true)
                 .setAutocomplete(true)
-        )
+        ),
+
+    new SlashCommandBuilder()
+        .setName('setnick')
+        .setDescription('Set your TTS display name')
+        .addStringOption(option =>
+            option
+                .setName('name')
+                .setDescription('Your TTS name, or reset')
+                .setRequired(true)
+                .setMaxLength(32)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('about')
+        .setDescription('Show VoiceX information and your TTS name')
 ].map(command => command.toJSON());
 
 const rest = new REST({ version: '10' })
@@ -68,7 +82,7 @@ try {
         { body: commands }
     );
 
-    console.log('✅ All 6 commands registered!');
+    console.log('All 8 commands registered!');
 } catch (error) {
-    console.error('❌ Command registration failed:', error);
+    console.error('Command registration failed:', error);
 }
