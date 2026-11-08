@@ -24,13 +24,18 @@ import ffmpegPath from 'ffmpeg-static';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-// Environment
+// ==================== CONFIG ====================
+
 const { DISCORD_TOKEN, ELEVENLABS_API_KEY } = process.env;
 
-// ElevenLabs settings
 const MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_multilingual_v2';
 const OUTPUT_FORMAT = 'mp3_44100_128';
 const DEFAULT_LANGUAGE = 'hi';
+
+const DEFAULT_VOICE_ID =
+    process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'JBFqnCBsd6RMkjVDRZzb';
+
+const SETTINGS_FILE = path.resolve('./voice-settings.json');
 
 const SUPPORTED_LANGUAGES = {
     hindi: { code: 'hi', label: 'Hindi' },
@@ -38,11 +43,8 @@ const SUPPORTED_LANGUAGES = {
     english: { code: 'en', label: 'English' }
 };
 
-const DEFAULT_VOICE_ID = process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'JBFqnCBsd6RMkjVDRZzb';
-const SETTINGS_FILE = path.resolve('./voice-settings.json');
-
 if (!DISCORD_TOKEN || !ELEVENLABS_API_KEY) {
-    console.error('Missing DISCORD_TOKEN or ELEVENLABS_API_KEY in environment variables!');
+    console.error('Missing DISCORD_TOKEN or ELEVENLABS_API_KEY!');
     process.exit(1);
 }
 
@@ -51,7 +53,8 @@ if (!ffmpegPath) {
     process.exit(1);
 }
 
-// Discord client
+// ==================== DISCORD CLIENT ====================
+
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -61,15 +64,20 @@ const client = new Client({
     ]
 });
 
-// Data
+// ==================== DATA ====================
+
 const sessions = new Map();
 const guildVoices = new Map();
 const guildNicknames = new Map();
 const guildLanguages = new Map();
 
+// Prevent the same interaction from being processed twice
+const processedInteractions = new Set();
+
 let availableVoices = [];
 
-// Helpers
+// ==================== HELPERS ====================
+
 function getNicknameKey(guildId, userId) {
     return `${guildId}:${userId}`;
 }
@@ -80,7 +88,7 @@ function getGuildLanguage(guildId) {
 
 function getLanguageLabel(code) {
     return Object.values(SUPPORTED_LANGUAGES)
-        .find(language => language.code === code)?.label || 'Hindi';
+        .find(item => item.code === code)?.label || 'Hindi';
 }
 
 function getTTSName(member, guildId = member?.guild?.id) {
@@ -96,7 +104,41 @@ function getTTSName(member, guildId = member?.guild?.id) {
         member.user.username;
 }
 
-// Load settings
+// Safely acknowledge an interaction exactly once
+async function safeDeferReply(interaction) {
+    if (!interaction.isRepliable()) {
+        return false;
+    }
+
+    if (interaction.deferred || interaction.replied) {
+        return false;
+    }
+
+    await interaction.deferReply();
+    return true;
+}
+
+async function safeEditReply(interaction, content) {
+    if (!interaction.isRepliable()) return;
+
+    if (interaction.deferred || interaction.replied) {
+        return interaction.editReply(content).catch(error => {
+            console.error('Edit reply error:', error.message);
+        });
+    }
+
+    return interaction.reply({
+        content: typeof content === 'string'
+            ? content
+            : content.content,
+        ephemeral: true
+    }).catch(error => {
+        console.error('Reply error:', error.message);
+    });
+}
+
+// ==================== SETTINGS ====================
+
 async function loadSettings() {
     try {
         const data = await fs.readFile(SETTINGS_FILE, 'utf8');
@@ -135,12 +177,11 @@ async function loadSettings() {
         console.log('Voice, nickname and language settings loaded.');
     } catch (error) {
         if (error.code !== 'ENOENT') {
-            console.error('Settings error:', error.message);
+            console.error('Settings loading error:', error.message);
         }
     }
 }
 
-// Save settings
 async function saveSettings() {
     const data = {
         guildVoices: Object.fromEntries(guildVoices),
@@ -155,7 +196,8 @@ async function saveSettings() {
     );
 }
 
-// Load ElevenLabs voices (v2 endpoint with pagination)
+// ==================== ELEVENLABS VOICES ====================
+
 async function loadVoices() {
     console.log('Loading ElevenLabs voices...');
 
@@ -165,19 +207,25 @@ async function loadVoices() {
 
         do {
             const url = new URL('https://api.elevenlabs.io/v2/voices');
+
             url.searchParams.set('page_size', '100');
             url.searchParams.set('include_total_count', 'false');
+
             if (nextPageToken) {
                 url.searchParams.set('next_page_token', nextPageToken);
             }
 
             const response = await fetch(url, {
-                headers: { 'xi-api-key': ELEVENLABS_API_KEY }
+                headers: {
+                    'xi-api-key': ELEVENLABS_API_KEY
+                }
             });
 
             if (!response.ok) {
                 const detail = await response.text();
-                throw new Error(`ElevenLabs voices API ${response.status}: ${detail.slice(0, 500)}`);
+                throw new Error(
+                    `ElevenLabs voices API ${response.status}: ${detail.slice(0, 500)}`
+                );
             }
 
             const data = await response.json();
@@ -192,18 +240,21 @@ async function loadVoices() {
                 }
             }
 
-            nextPageToken = data.has_more ? data.next_page_token : null;
+            nextPageToken = data.has_more
+                ? data.next_page_token
+                : null;
+
         } while (nextPageToken);
 
         availableVoices = voices;
+
         console.log(`Loaded ${availableVoices.length} ElevenLabs voices.`);
     } catch (error) {
-        console.error('ElevenLabs voice loading error:', error.message);
+        console.error('Voice loading error:', error.message);
         availableVoices = [];
     }
 }
 
-// Get selected voice
 function getGuildVoice(guildId) {
     const savedId = guildVoices.get(guildId);
 
@@ -216,11 +267,13 @@ function getGuildVoice(guildId) {
         || availableVoices[0];
 }
 
-// Generate speech with ElevenLabs
+// ==================== ELEVENLABS TTS ====================
+
 async function generateSpeech(text, voiceId, language) {
     const url = new URL(
         `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`
     );
+
     url.searchParams.set('output_format', OUTPUT_FORMAT);
 
     const response = await fetch(url, {
@@ -233,8 +286,6 @@ async function generateSpeech(text, voiceId, language) {
         body: JSON.stringify({
             text,
             model_id: MODEL_ID,
-            // eleven_multilingual_v2 performs multilingual detection itself.
-            // language is retained for the existing /setlang server setting.
             voice_settings: {
                 stability: 0.5,
                 similarity_boost: 0.75,
@@ -246,13 +297,17 @@ async function generateSpeech(text, voiceId, language) {
 
     if (!response.ok) {
         const detail = await response.text();
-        throw new Error(`ElevenLabs TTS API ${response.status}: ${detail.slice(0, 700)}`);
+
+        throw new Error(
+            `ElevenLabs TTS API ${response.status}: ${detail.slice(0, 700)}`
+        );
     }
 
     return Buffer.from(await response.arrayBuffer());
 }
 
-// Play audio
+// ==================== AUDIO PLAYER ====================
+
 async function playAudio(session, audioBuffer) {
     const ffmpeg = spawn(ffmpegPath, [
         '-hide_banner',
@@ -271,7 +326,7 @@ async function playAudio(session, audioBuffer) {
     });
 
     ffmpeg.on('error', error => {
-        console.error('FFmpeg error:', error);
+        console.error('FFmpeg error:', error.message);
     });
 
     session.player.play(resource);
@@ -300,7 +355,8 @@ async function playAudio(session, audioBuffer) {
     }
 }
 
-// Speech queue
+// ==================== SPEECH QUEUE ====================
+
 async function processQueue(session) {
     if (session.processing) return;
 
@@ -323,8 +379,14 @@ async function processQueue(session) {
 
                 const language = getGuildLanguage(session.guildId);
 
-                console.log(`Speaking with ElevenLabs voice ${voice.name}:`, text);
-                console.log(`TTS language: ${getLanguageLabel(language)}`);
+                console.log(
+                    `Speaking with ElevenLabs voice ${voice.name}:`,
+                    text
+                );
+
+                console.log(
+                    `TTS language: ${getLanguageLabel(language)}`
+                );
 
                 const audio = await generateSpeech(
                     text,
@@ -357,7 +419,6 @@ async function processQueue(session) {
     }
 }
 
-// Add speech to queue
 function enqueueSpeech(session, text) {
     if (!text || !text.trim()) return;
 
@@ -365,7 +426,6 @@ function enqueueSpeech(session, text) {
     processQueue(session);
 }
 
-// Stop speech
 function stopSpeech(session) {
     session.queue = [];
 
@@ -377,7 +437,8 @@ function stopSpeech(session) {
     session.player.stop(true);
 }
 
-// Create voice session
+// ==================== VOICE SESSION ====================
+
 function createSession(guild, voiceChannel) {
     const oldSession = sessions.get(guild.id);
 
@@ -413,17 +474,18 @@ function createSession(guild, voiceChannel) {
     sessions.set(guild.id, session);
 
     connection.on('error', error => {
-        console.error('Voice connection error:', error);
+        console.error('Voice connection error:', error.message);
     });
 
     player.on('error', error => {
-        console.error('Audio player error:', error);
+        console.error('Audio player error:', error.message);
     });
 
     return session;
 }
 
-// Bot ready
+// ==================== BOT READY ====================
+
 client.once(Events.ClientReady, async readyClient => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('       VOICEX BOT ONLINE');
@@ -439,14 +501,17 @@ client.once(Events.ClientReady, async readyClient => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 });
 
-// Interactions
+// ==================== INTERACTIONS ====================
+
 client.on(Events.InteractionCreate, async interaction => {
 
-    // Voice autocomplete
+    // Autocomplete
     if (interaction.isAutocomplete()) {
         if (interaction.commandName !== 'setvoice') return;
 
-        const focused = interaction.options.getFocused().toLowerCase();
+        const focused = interaction.options
+            .getFocused()
+            .toLowerCase();
 
         const results = availableVoices
             .filter(voice =>
@@ -459,16 +524,31 @@ client.on(Events.InteractionCreate, async interaction => {
                 value: voice.id
             }));
 
-        return interaction.respond(results).catch(() => {});
+        if (!interaction.responded) {
+            await interaction.respond(results).catch(() => {});
+        }
+
+        return;
     }
 
     if (!interaction.isChatInputCommand()) return;
     if (!interaction.guild) return;
 
+    // Ignore duplicate delivery in this process
+    if (processedInteractions.has(interaction.id)) return;
+
+    processedInteractions.add(interaction.id);
+
+    // Keep a short-lived record to prevent duplicate handling
+    setTimeout(() => {
+        processedInteractions.delete(interaction.id);
+    }, 15 * 60 * 1000).unref?.();
+
     const guildId = interaction.guild.id;
 
     try {
-        await interaction.deferReply();
+        // Acknowledge only if this interaction is not already acknowledged
+        await safeDeferReply(interaction);
 
         // SET NICKNAME
         if (interaction.commandName === 'setnick') {
@@ -476,7 +556,10 @@ client.on(Events.InteractionCreate, async interaction => {
                 .getString('name', true)
                 .trim();
 
-            const key = getNicknameKey(guildId, interaction.user.id);
+            const key = getNicknameKey(
+                guildId,
+                interaction.user.id
+            );
 
             if (requestedName.toLowerCase() === 'reset') {
                 guildNicknames.delete(key);
@@ -486,13 +569,15 @@ client.on(Events.InteractionCreate, async interaction => {
                     interaction.user.id
                 );
 
-                return interaction.editReply(
+                return safeEditReply(
+                    interaction,
                     `✅ Custom TTS name reset. VoiceX will now say **${member.displayName}**.`
                 );
             }
 
             if (!requestedName || requestedName.length > 32) {
-                return interaction.editReply(
+                return safeEditReply(
+                    interaction,
                     '❌ Name must be between 1 and 32 characters.'
                 );
             }
@@ -500,7 +585,8 @@ client.on(Events.InteractionCreate, async interaction => {
             guildNicknames.set(key, requestedName);
             await saveSettings();
 
-            return interaction.editReply(
+            return safeEditReply(
+                interaction,
                 `✅ Your TTS name is now **${requestedName}**!`
             );
         }
@@ -513,7 +599,8 @@ client.on(Events.InteractionCreate, async interaction => {
             const language = SUPPORTED_LANGUAGES[selectedLanguage];
 
             if (!language) {
-                return interaction.editReply(
+                return safeEditReply(
+                    interaction,
                     '❌ Unsupported language. Choose Hindi, Marathi, or English.'
                 );
             }
@@ -521,7 +608,8 @@ client.on(Events.InteractionCreate, async interaction => {
             guildLanguages.set(guildId, language.code);
             await saveSettings();
 
-            return interaction.editReply(
+            return safeEditReply(
+                interaction,
                 `✅ VoiceX language changed to **${language.label}** for this server!`
             );
         }
@@ -532,7 +620,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 interaction.user.id
             );
 
-            return interaction.editReply({
+            return safeEditReply(interaction, {
                 content: [
                     '**🎧 VoiceX — Discord TTS Bot**',
                     'Converts messages into voice audio in your server.',
@@ -556,7 +644,8 @@ client.on(Events.InteractionCreate, async interaction => {
             const voiceChannel = member.voice.channel;
 
             if (!voiceChannel) {
-                return interaction.editReply(
+                return safeEditReply(
+                    interaction,
                     '❌ Pehle voice channel join karo!'
                 );
             }
@@ -572,7 +661,8 @@ client.on(Events.InteractionCreate, async interaction => {
                 20000
             );
 
-            return interaction.editReply(
+            return safeEditReply(
+                interaction,
                 `✅ VoiceX joined **${voiceChannel.name}**!`
             );
         }
@@ -582,7 +672,8 @@ client.on(Events.InteractionCreate, async interaction => {
             const session = sessions.get(guildId);
 
             if (!session) {
-                return interaction.editReply(
+                return safeEditReply(
+                    interaction,
                     '❌ VoiceX is not in a voice channel!'
                 );
             }
@@ -591,7 +682,8 @@ client.on(Events.InteractionCreate, async interaction => {
             session.connection.destroy();
             sessions.delete(guildId);
 
-            return interaction.editReply(
+            return safeEditReply(
+                interaction,
                 '👋 VoiceX left the voice channel.'
             );
         }
@@ -601,18 +693,21 @@ client.on(Events.InteractionCreate, async interaction => {
             const session = sessions.get(guildId);
 
             if (!session) {
-                return interaction.editReply(
+                return safeEditReply(
+                    interaction,
                     '❌ Pehle /join use karo!'
                 );
             }
 
-            const text = interaction.options.getString('text', true);
+            const text = interaction.options
+                .getString('text', true);
 
             enqueueSpeech(session, text);
 
             const voice = getGuildVoice(guildId);
 
-            return interaction.editReply(
+            return safeEditReply(
+                interaction,
                 `🔊 Added to queue! Voice: **${voice?.name || 'Default'}**`
             );
         }
@@ -622,14 +717,16 @@ client.on(Events.InteractionCreate, async interaction => {
             const session = sessions.get(guildId);
 
             if (!session) {
-                return interaction.editReply(
+                return safeEditReply(
+                    interaction,
                     '❌ VoiceX is not in a voice channel!'
                 );
             }
 
             stopSpeech(session);
 
-            return interaction.editReply(
+            return safeEditReply(
+                interaction,
                 '⏹️ Speech stopped and queue cleared!'
             );
         }
@@ -637,7 +734,8 @@ client.on(Events.InteractionCreate, async interaction => {
         // VOICES
         if (interaction.commandName === 'voices') {
             if (availableVoices.length === 0) {
-                return interaction.editReply(
+                return safeEditReply(
+                    interaction,
                     '❌ ElevenLabs voices load nahi hui. API key aur account access check karo.'
                 );
             }
@@ -686,21 +784,23 @@ client.on(Events.InteractionCreate, async interaction => {
                 `Language: **${getLanguageLabel(getGuildLanguage(guildId))}** (change with /setlang)`
             ].join('\n');
 
-            return interaction.editReply({
+            return safeEditReply(interaction, {
                 content: description.slice(0, 1900)
             });
         }
 
         // SET VOICE
         if (interaction.commandName === 'setvoice') {
-            const voiceId = interaction.options.getString('voice', true);
+            const voiceId = interaction.options
+                .getString('voice', true);
 
             const selectedVoice = availableVoices.find(
                 v => v.id === voiceId
             );
 
             if (!selectedVoice) {
-                return interaction.editReply(
+                return safeEditReply(
+                    interaction,
                     '❌ Voice nahi mili. `/voices` check karo.'
                 );
             }
@@ -708,23 +808,30 @@ client.on(Events.InteractionCreate, async interaction => {
             guildVoices.set(guildId, selectedVoice.id);
             await saveSettings();
 
-            return interaction.editReply(
+            return safeEditReply(
+                interaction,
                 `✅ Voice changed to **${selectedVoice.name}** (${selectedVoice.gender})!`
             );
         }
 
+        // UNKNOWN COMMAND
+        return safeEditReply(
+            interaction,
+            '❌ Unknown command.'
+        );
+
     } catch (error) {
         console.error('Command error:', error);
 
-        if (interaction.deferred || interaction.replied) {
-            await interaction.editReply(
-                `❌ Error: ${error.message}`
-            ).catch(() => {});
-        }
+        await safeEditReply(
+            interaction,
+            `❌ Error: ${error.message}`
+        );
     }
 });
 
-// Automatic voice-channel text chat reading
+// ==================== AUTO VOICE CHAT TTS ====================
+
 client.on(Events.MessageCreate, async message => {
     if (message.author.bot) return;
     if (!message.guild) return;
@@ -747,10 +854,15 @@ client.on(Events.MessageCreate, async message => {
         const member = message.member ||
             await message.guild.members.fetch(message.author.id);
 
-        const displayName = getTTSName(member, message.guild.id);
+        const displayName = getTTSName(
+            member,
+            message.guild.id
+        );
+
         const text = `${displayName} says: ${message.content}`;
 
         enqueueSpeech(session, text.slice(0, 500));
+
     } catch (error) {
         console.error('Display name error:', error.message);
 
@@ -764,12 +876,22 @@ client.on(Events.MessageCreate, async message => {
     }
 });
 
-// Discord errors
+// ==================== DISCORD ERRORS ====================
+
 client.on(Events.Error, error => {
     console.error('Discord client error:', error);
 });
 
-// Login
+process.on('unhandledRejection', error => {
+    console.error('Unhandled rejection:', error);
+});
+
+process.on('uncaughtException', error => {
+    console.error('Uncaught exception:', error);
+});
+
+// ==================== LOGIN ====================
+
 client.login(DISCORD_TOKEN).catch(error => {
     console.error('Discord login failed:', error.message);
     process.exit(1);
